@@ -21,13 +21,18 @@ package uk.co.qmul.giraph.dynamicgraph;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.giraph.bsp.BspInputSplit;
+import org.apache.giraph.conf.ImmutableClassesGiraphConfiguration;
 import org.apache.giraph.master.DefaultMasterCompute;
 import org.apache.log4j.Logger;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.conf.Configuration;
+
+
 /**
  * Master compute associated with {@link DynamicGraphComputation}. It is the first thing to
  * run in each super step. It has a watcher to see if there is any modification in input
@@ -41,6 +46,8 @@ public class InjectorMasterCompute extends DefaultMasterCompute {
 	
 	FileWatcher fileWatcher;
 	
+	DynamicSplitManager dm = null;
+	
 	private final long SLEEPSECONDS = 10;
 	
 	@Override
@@ -52,6 +59,12 @@ public class InjectorMasterCompute extends DefaultMasterCompute {
 		if (fileWatcher != null){
 			LOG.info("[Prometheus] FileWatcher object successfully created!");
 		}
+		
+		InputSplit inputSplit = getContext().getInputSplit();
+		dm = new DynamicSplitManager(getConf(), inputSplit);
+		
+		
+		
 		LOG.info("[Prometheus] InjectorMasterCompute class initialization DONE!");
 	}
 	
@@ -79,11 +92,15 @@ public class InjectorMasterCompute extends DefaultMasterCompute {
 			//Compare the blocks so that only modified blocks should be updated:
 			fileWatcher.compareBlocks();
 			// I guess one should actually compare the input splits.
-			// alert workers
+			// alert worker
 		}
 	}
 	
-	
+	/**
+	 * Watches the HDFS for any modification in the input files
+	 * @author hduser
+	 *
+	 */
 	public static class FileWatcher {
 		private String inputPath = "/user/hduser/dynamic/GoogleJSON.txt";
 		private long modificationTime;
@@ -198,6 +215,8 @@ public class InjectorMasterCompute extends DefaultMasterCompute {
 				//updates the block locations:
 				setFileBlockLocations();
 				LOG.info("[PROMETHEUS] Done.");
+				
+				LOG.info("[PROMETHEUS] Trying to get original JobConfiguration from JobClient.");
 				//check which splits were modified (maybe there are not modified splits).
 				
 			}
@@ -267,6 +286,99 @@ public class InjectorMasterCompute extends DefaultMasterCompute {
 		
 		public boolean getFileModifed(){
 			return this.fileModified;
+		}
+		}
+
+	/**
+	 * Simple VertexInputFormat that supports {@link InjectorMasterCompute}
+	 */
+	public static class DynamicSplitManager{
+		/** Class logger */
+		private static final Logger LOG = Logger
+				.getLogger(DynamicSplitManager.class);
+		/**
+		 * Configuration.
+		 */
+		ImmutableClassesGiraphConfiguration<?, ?, ?> Gconf;
+
+		/**
+		 * First initialisation of InputSplit
+		 */
+		private BspInputSplit inputSplit = null;
+
+		DynamicSplitManager(Configuration conf, InputSplit inSplit){
+			LOG.info("[PROMETHEUS] Initializing.");
+			LOG.info("[PROMETHEUS] Getting configuration:");
+			this.Gconf = (ImmutableClassesGiraphConfiguration<?, ?, ?>) conf;
+			LOG.info("[PROMETHEUS] Done!");
+			
+			LOG.info("[PROMETHEUS] Creating BspInputSplits:");
+			this.inputSplit = (BspInputSplit) inSplit;
+			LOG.info("[PROMETHEUS] Done!");
+			
+			LOG.info("[PROMETHEUS] Trying to print the BSPInputSplits content:");
+			LOG.info("[PROMETHEUS] Content:" + inputSplit.toString());
+			LOG.info("[PROMETHEUS] Done!:");
+			
+			//InputSplit is =  MapContext.getInputSplit();
+			//try{
+				//Mapper<KEYIN, VALUEIN, KEYOUT, VALUEOUT>.Context.getJobName();
+				//Context.getJobName();
+				//FileInputFormat.getSplits(job);
+			//}
+			//job.
+			//try{
+			//FileInputFormat.getSplits(job);
+			//}
+			//this.inputSplit = (BspInputSplit) split;
+		}
+
+		public void getInputSplitsString() {
+			LOG.info("[PROMETHEUS] printing inputSplit to string");
+			//LOG.info("[PROMETHEUS] " + inputSplit.toString());
+			LOG.info("[PROMETHEUS] Done");
+		}
+		
+		/**
+		 * Gets the index for that the given split
+		 */
+		public void getInputSplitIndex()
+		{
+			LOG.info("[PROMETHEUS] Printing Input Split Index:");
+//			LOG.info("[PROMETHEUS] " + inputSplit.getSplitIndex());
+			LOG.info("[PROMETHEUS] SUCCESS! :)");
+//			return inputSplit.getSplitIndex();
+		}
+		
+		/**
+		 * Get the number of splits for this application
+		 * @return integer
+		 */
+		public void getNumberOfSplits()
+		{
+//			return inputSplit.getNumSplits();
+		}
+		
+		/**
+		 * Get the split size
+		 * @return integer
+		 * @throws InterruptedException 
+		 * @throws IOException 
+		 */
+		public void getSplitLength() throws IOException, InterruptedException
+		{
+//			return inputSplit.getLength();
+		}
+		
+		/**
+		 * Get the locations of the splits
+		 * @return String
+		 * @throws InterruptedException 
+		 * @throws IOException 
+		 */
+		public void getSplitLocations() throws IOException, InterruptedException
+		{
+//			return inputSplit.getLocations();
 		}
 		}
 }

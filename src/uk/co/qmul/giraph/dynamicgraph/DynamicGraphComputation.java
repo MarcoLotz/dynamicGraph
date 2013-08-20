@@ -20,12 +20,14 @@ package uk.co.qmul.giraph.dynamicgraph;
 
 import org.apache.giraph.Algorithm;
 import org.apache.giraph.graph.BasicComputation;
+import org.apache.giraph.conf.ImmutableClassesGiraphConfiguration;
 import org.apache.giraph.edge.Edge;
 import org.apache.giraph.graph.Vertex;
+import org.apache.giraph.worker.WorkerContext;
 import org.apache.hadoop.io.DoubleWritable;
 import org.apache.hadoop.io.FloatWritable;
 import org.apache.hadoop.io.LongWritable;
-//import org.apache.log4j.Level;
+import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.log4j.Logger;
 
 import java.io.IOException;
@@ -52,6 +54,11 @@ public class DynamicGraphComputation
 	/** Class logger */
 	private static final Logger LOG = Logger
 			.getLogger(DynamicGraphComputation.class);
+	
+	/**
+	 *  Gets the job configuration.
+	 */
+	ImmutableClassesGiraphConfiguration<?, ?, ?> Gconf;
 
 	/**
 	 * Send messages to all the connected vertices. The content of the messages
@@ -71,6 +78,17 @@ public class DynamicGraphComputation
 	public void compute(
 			Vertex<LongWritable, DoubleWritable, FloatWritable> vertex,
 			Iterable<DoubleWritable> messages) throws IOException {
+		if (getSuperstep() == 0)
+		{
+//			String tmp;
+//			LOG.info("[PROMETHEUS] getting configuration with Gconf");
+//			Gconf = getConf();
+//			LOG.info("[PROMETHEUS] Success!");
+//			
+//			LOG.info("[PROMETHEUS] Getting map.input.file:");
+//			tmp = Gconf.get("map.input.file");
+//			LOG.info("[PROMETHEUS] " + tmp);
+		}
 	
 		if ( getSuperstep() < MAX_SUPERSTEPS)
 		{
@@ -79,5 +97,65 @@ public class DynamicGraphComputation
 			BFSMessages(vertex);
 		}
 		vertex.voteToHalt();
+	}
+	
+	
+	
+	
+	
+	
+	
+	
+
+	/**
+	 * Worker context used with {@link DynamicGraphComputation}.
+	 */
+	public static class SimpleDynamicWorkerContext extends WorkerContext {
+		
+		private static final Logger LOG = Logger
+				.getLogger(SimpleDynamicWorkerContext.class);
+
+		@Override
+		public void preApplication() throws InstantiationException,
+				IllegalAccessException {
+		}
+
+		@Override
+		public void postApplication() {
+		}
+
+		@Override
+		public void preSuperstep() {
+			LOG.info("[PROMETHEUS] Getting InputSplit information");
+			InputSplit inputSplit = getContext().getInputSplit(); // I guess it works :)
+			try {
+				LOG.info("[PROMETHEUS] Size of input split: " + inputSplit.getLength());
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+			LOG.info("[PROMETHEUS] locations of input split:");
+			String[] locations;
+			try {
+				locations = inputSplit.getLocations();
+				for ( int i = 0 ; i < locations.length; i ++ )
+				{
+					LOG.info("[PROMETHEUS] " + locations[i]);
+				}
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			} catch (IOException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		}
+
+		@Override
+		public void postSuperstep() {
+		}
 	}
 }

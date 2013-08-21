@@ -20,8 +20,9 @@ package uk.co.qmul.giraph.dynamicgraph;
 
 import org.apache.giraph.Algorithm;
 import org.apache.giraph.graph.BasicComputation;
-import org.apache.giraph.graph.VertexMutations;
 import org.apache.giraph.edge.Edge;
+import org.apache.giraph.edge.EdgeFactory;
+import org.apache.giraph.edge.OutEdges;
 import org.apache.giraph.graph.Vertex;
 import org.apache.giraph.master.DefaultMasterCompute;
 import org.apache.hadoop.conf.Configuration;
@@ -35,10 +36,17 @@ import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.log4j.Logger;
 import org.apache.giraph.aggregators.BooleanOverwriteAggregator;
+import org.json.JSONArray;
+import org.json.JSONException;
 
 import uk.co.qmul.giraph.dynamicgraph.PathAggregator;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.List;
+
+import com.google.common.collect.Lists;
 
 /**
  * Demonstrates the basic Pregel applied to Dynamic Graphs. This is a just a
@@ -64,7 +72,7 @@ public class DynamicGraphComputation
 	/**
 	 * Gets the maximum number of Super steps to be computed
 	 */
-	public final int MAX_SUPERSTEPS = 6;
+	public final int MAX_SUPERSTEPS = 7;
 	
 	public static boolean WaitedRemoval = false;
 
@@ -178,39 +186,82 @@ public class DynamicGraphComputation
 		LOG.info("[PROMETHEUS] Correctly got file status");
 		LOG.info("[PROMETHEUS] file status: Length : " +
 		fileStatus.getLen());
-		LOG.info("[PROMETHEUS] 				modTime:   " +
-		fileStatus.getModificationTime());
 		
 		//Do the injection.
-		Inject();
-		//use addVertexRequest(id, value, edges);
+		Inject(fs, inputPath);
+		
 		InformMasterCompute();
 	}
 	
-	public void Inject(){
-		VertexMutations<LongWritable, DoubleWritable, FloatWritable> vertexMutations = 
-				new VertexMutations<LongWritable, DoubleWritable, FloatWritable>();
+	/**
+	 * Injector, injects new vertex from desired input.
+	 * Note: One may modify it in the future with vertexMutations
+	 * To allow vertex mutation without removing the vertices.
+	 * @param file system that is going to be used
+	 * @param path that is going to be read
+	 * @throws IOException
+	 */
+	@SuppressWarnings({ "unchecked", "rawtypes" })
+	public void Inject(FileSystem fs, Path path) throws IOException{
 		
-		vertexMutations.setConf(getConf());
-		//Do vertex mutations
-		//Use vertex resolver
+		//Maybe one should use the standard JSONReader.
+		LOG.info("[PROMETHEUS] Creating JSON variables");
+		String line;
+		Text inputLine;
+		JSONArray preProcessedLine;
+		
+		LOG.info("[PROMETHEUS] Creating JSON Reader:");
+		JSONDynamicReader DynamicReader = new JSONDynamicReader();
+		LOG.info("[PROMETHEUS] JSON reader created with success!");
+		
+		LOG.info("[PROMETHEUS] Creating Vertex Injection variables");
+		LongWritable vertexId;
+		DoubleWritable vertexValue;
+		Iterable<Edge<LongWritable, FloatWritable>> vertexEdges;
+		
+	    LOG.info("[PROMETHEUS] Creating a Buffered reader");
+		BufferedReader br = new BufferedReader(new InputStreamReader(fs.open(path)));
+		try{
+			line = br.readLine();
+			while (line != null) {
+				inputLine = new Text(line);
+				preProcessedLine = DynamicReader.preprocessLine(inputLine);
+				vertexId = DynamicReader.getId(preProcessedLine);
+				vertexValue = DynamicReader.getValue(preProcessedLine);
+				vertexEdges = DynamicReader.getEdges(preProcessedLine);
+				
+				OutEdges outEdges = null;
+				outEdges.initialize(vertexEdges);
+				
+				addVertexRequest(vertexId, vertexValue, vertexEdges);
+				
+				LOG.info("[PROMETHEUS] Adding vertex [id,value]:" + vertexId +","+vertexValue);
+				line = br.readLine();
+			}
+		} catch (JSONException e) {
+			LOG.info("[PROMETHEUS] Problem in JSON reader");
+			e.printStackTrace();
+		}
+		finally{
+			br.close();
+		 }
+//		//Do vertex mutations
+//		//Use vertex resolver*/
 	}
 	
 	@Override
 	public void preSuperstep() {
 		super.preSuperstep();
-		LOG.info("[PROMETHEUS] Pre superstep running in superstep: " + getSuperstep());
-		if (getSuperstep() == 0 ) // its before the first superstep
+		if (getSuperstep() == 0 )
 		{
 			try {
 				addVertexRequest(INJECTOR_VERTEX_ID, INJECTOR_VERTEX_VALUE);
 			} catch (IOException e) {
-				LOG.info("[PROMETHEUS] Could not add the vertex!");
+				LOG.info("[PROMETHEUS] Could not add injector vertex!");
 				e.printStackTrace();
 			}
 			LOG.info("[PROMETHEUS] Injector vertex created!");
 		}
-		//add the vertex if it is the first superstep!
 	}
 	
 	public void InformMasterCompute()
@@ -386,4 +437,44 @@ public class DynamicGraphComputation
 			}
 		}
 	}
+	
+	
+	
+	public static class JSONDynamicReader {
+		
+			public JSONDynamicReader(){}
+
+			public JSONArray preprocessLine(Text line) throws JSONException {
+				return new JSONArray(line.toString());
+			}
+
+			public LongWritable getId(JSONArray jsonVertex) throws JSONException,
+					IOException {
+				return new LongWritable(jsonVertex.getLong(0));
+			}
+
+			public DoubleWritable getValue(JSONArray jsonVertex) throws JSONException,
+					IOException {
+				return new DoubleWritable(jsonVertex.getDouble(1));
+			}
+
+			public Iterable<Edge<LongWritable, FloatWritable>> getEdges(
+					JSONArray jsonVertex) throws JSONException, IOException {
+				JSONArray jsonEdgeArray = jsonVertex.getJSONArray(2);
+				List<Edge<LongWritable, FloatWritable>> edges = Lists
+						.newArrayListWithCapacity(jsonEdgeArray.length());
+				for (int i = 0; i < jsonEdgeArray.length(); ++i) {
+					JSONArray jsonEdge = jsonEdgeArray.getJSONArray(i);
+					edges.add(EdgeFactory.create(new LongWritable(jsonEdge.getLong(0)),
+							new FloatWritable((float) jsonEdge.getDouble(1))));
+				}
+				return edges;
+			}
+
+			public Vertex<LongWritable, DoubleWritable, FloatWritable> handleException(
+					Text line, JSONArray jsonVertex, JSONException e) {
+				throw new IllegalArgumentException("Couldn't get vertex from line "
+						+ line, e);
+			}
+		}
 }

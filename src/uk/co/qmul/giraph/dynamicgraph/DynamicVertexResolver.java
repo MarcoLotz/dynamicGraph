@@ -23,6 +23,8 @@ import org.apache.log4j.Logger;
  * java/org/apache/giraph/graph/VertexResolver.java?r=16
  */
 
+/*TODO: finish the implementation of this class*/
+
 @SuppressWarnings("rawtypes")
 
 public class DynamicVertexResolver<I extends WritableComparable, V extends Writable,

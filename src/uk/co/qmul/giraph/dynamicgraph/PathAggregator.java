@@ -21,11 +21,10 @@ import org.apache.giraph.aggregators.BasicAggregator;
 import org.apache.hadoop.io.Text;
 
 /**
- * Aggregator for transmitting text.
- * The default value when nothing is aggregated is false.
+ * Aggregator used for Text.
+ * @author: Marco Aurelio Lotz
  */
 public class PathAggregator extends BasicAggregator<Text> {
-  
 	
 /* 
  * @see org.apache.giraph.aggregators.Aggregator#aggregate(org.apache.hadoop.io.Writable)

@@ -20,6 +20,7 @@ package uk.co.qmul.giraph.dynamicgraph;
 
 import org.apache.giraph.Algorithm;
 import org.apache.giraph.graph.BasicComputation;
+import org.apache.giraph.edge.ArrayListEdges;
 import org.apache.giraph.edge.Edge;
 import org.apache.giraph.edge.EdgeFactory;
 import org.apache.giraph.graph.Vertex;
@@ -48,31 +49,49 @@ import java.util.List;
 import com.google.common.collect.Lists;
 
 /**
- * Demonstrates the basic Pregel applied to Dynamic Graphs. This is a just a
- * vertex computation prototype class to check how the system may recognise a
- * modification in a FS file.
+ * Demonstrates the Pregel concepts applied to Dynamic Graphs. It uses a File
+ * Observer to warn a special vertex when and what to inject into the
+ * application
  * 
- * @author MarcoLotz
+ * @author Marco Aurelio Lotz
  */
 
-@Algorithm(name = "Dynamic Graph Computation", description = "Makes computation on dynamic graphs")
+@Algorithm(name = "Dynamic Graph Computation", description = "Computes dynamic graphs")
 public class DynamicGraphComputation
 		extends
 		BasicComputation<LongWritable, DoubleWritable, FloatWritable, DoubleWritable> {
-	/** Path aggregator name */
+
+	/**
+	 * Path Aggregator name. This Aggregator is used to communicate the
+	 * injection Path from the Master to the Injector vertex.
+	 */
 	private static String PATH_AGG = "PathAgg";
 
-	/** FS Update aggregator name */
+	/**
+	 * File System update aggregator. This aggregator is used in order to
+	 * communicate the injector that a modification in the observed file has
+	 * happened.
+	 */
 	private static String FS_AGG = "FileSystemAgg";
 
-	/** Injection Complete Status aggregator */
+	/**
+	 * Injection Complete Status Aggregator. Used to tell the Master that the
+	 * vertice database inside the workers is up-to-date. Blocks new data base
+	 * update request from the master.
+	 */
+
 	private static String INJ_RDY_AGG = "InjectionReadyAgg";
 
 	/**
-	 * Gets the maximum number of Super steps to be computed
+	 * Maximum number of Supersteps to be computed before halting.
 	 */
 	public final int MAX_SUPERSTEPS = 7;
 
+	/**
+	 * Used by the injector vertex in order to wait a complete superstep before
+	 * starting injection. In the superstep that the injector is waiting, nodes
+	 * that are not the injector request removal.
+	 */
 	public static boolean WaitedRemoval = false;
 
 	/**
@@ -92,11 +111,13 @@ public class DynamicGraphComputation
 	BooleanWritable fsModificationStatus = new BooleanWritable();
 
 	/**
-	 * Send messages to all the connected vertices. The content of the messages
-	 * is not important, since just the event of receiving a message removes the
-	 * vertex from the inactive status.
+	 * Send messages to all adjacent vertices. The content of the messages is
+	 * not important, since just the event of receiving a message removes the
+	 * vertex from the inactive status. This should be modified for other types
+	 * of computations
 	 * 
-	 * @param vertex
+	 * @param current
+	 *            vertex.
 	 */
 	public void BFSMessages(
 			Vertex<LongWritable, DoubleWritable, FloatWritable> vertex) {
@@ -111,47 +132,61 @@ public class DynamicGraphComputation
 			Iterable<DoubleWritable> messages) throws IOException {
 		if (getSuperstep() < MAX_SUPERSTEPS) {
 
+			// Checks if Master indicated a modification in the FileSystem
 			fsModificationStatus = (BooleanWritable) getAggregatedValue(FS_AGG);
 
-			// Check if it is the injector vertex
+			// Injector vertex routine
 			if (vertex.getId() == INJECTOR_VERTEX_ID) {
 				InjectorMonitor();
-			} else {
-				// If a modification in the fileSystem happened, remove all
-				// vertex that are not the injector.
+			}
+			// All other vertex computation are here.
+			else {
+				// Removes all nodes if there was a FS modification
 				if ((vertex.getId() != INJECTOR_VERTEX_ID)
 						&& (fsModificationStatus.get())) {
-					// removes all the current vertices
 					LOG.info("Vertex :" + vertex.getId().get()
-							+ " being removed in superstep " + getSuperstep());
+							+ " being removed in superstep: " + getSuperstep());
 					removeVertexRequest(vertex.getId());
-				}
-				// Vertices do standard computation here
-				else {
+				} else {
+					// Insert standard computation code here.
+					// It is important the a vertex that requested to be removed
+					// do not receive any message.
 					BFSMessages(vertex);
+
+					// The injector vertex should never halt.
 					vertex.voteToHalt();
 				}
 			}
 		} else {
+			// Always converge if Maximum Superstep, even the Injector
 			vertex.voteToHalt();
-		} // Always converge in the last superstep, even the Injector
+		}
 	}
 
+	/**
+	 * Injector vertex checks for a modification in the file system.
+	 */
 	public void InjectorMonitor() {
 		// Checks for file system update
 		if (true == fsModificationStatus.get()) {
-			LOG.info("[PROMETHEUS] The master vertex as communicated a modification in the file system");
-			LOG.info("[PROMETHEUS] In the superstep " + getSuperstep());
+			LOG.info("Master indicated modification in input files.");
+			LOG.info("Modification superstep: " + getSuperstep());
 
-			// Only Injects in the second call of this method, the first call is
+			// Only Injects a superstep after the modification, the first call
+			// is
 			// when the vertices will be getting removed.
 			// One can also do this by using the getNumberVertex and wait until
-			// it is only the injector.
+			// it is only the injector or do in the same removal superstep by
+			// using the VertexResolver
 			if (true == WaitedRemoval) {
 				try {
-					UpdateFileSystem();
+					updateVertexDataBase();
+
+					// Informs master that the update is finished
+					informMasterCompute();
 				} catch (IOException e) {
-					LOG.info("[PROMETHEUS] Problem Updating File System.");
+					LOG.info("Problem updating vertex data base.");
+					e.getStackTrace();
 				}
 				WaitedRemoval = false;
 			} else {
@@ -160,39 +195,40 @@ public class DynamicGraphComputation
 		}
 	}
 
-	public void UpdateFileSystem() throws IOException {
+	/**
+	 * Gets the path from the aggregator and configures the file system in order
+	 * to retrieve the file data
+	 * 
+	 * @throws IOException
+	 */
+	public void updateVertexDataBase() throws IOException {
 		FileSystem fs;
 		Configuration config = new Configuration();
 		FileStatus fileStatus;
 
-		LOG.info("[PROMETHEUS] UpdatingFileSystem() in SuperStep "
-				+ getSuperstep());
-		Text inputString = getAggregatedValue(PATH_AGG); // Gets the paths in
-															// the HDFS
+		// Gets the File System path to the modified file
+		Text inputString = getAggregatedValue(PATH_AGG);
 		Path inputPath = new Path(inputString.toString());
 
-		LOG.info("[PROMETHEUS] Injector: the path is" + inputPath.getParent()
+		LOG.info("Injector: the path is" + inputPath.getParent()
 				+ inputPath.getName());
-		LOG.info("[PROMETHEUS] Checking file in HDFS");
 
 		fs = FileSystem.get(config);
 
-		// Remove next block, just checking if file system is ok.
-		fileStatus = fs.getFileStatus(inputPath);// Just to check if the file
-													// was correctly accessed.
-		LOG.info("[PROMETHEUS] Correctly got file status");
-		LOG.info("[PROMETHEUS] file status: Length : " + fileStatus.getLen());
-
-		// Do the injection.
-		Inject(fs, inputPath);
-
-		InformMasterCompute();
+		LOG.info("Checking file in File System");
+		fileStatus = fs.getFileStatus(inputPath);
+		if (null != fileStatus) {
+			// Do the injection.
+			Inject(fs, inputPath);
+		} else {
+			LOG.info("Problem looking for the file in HDFS");
+		}
 	}
 
 	/**
-	 * Injector, injects new vertex from desired input. Note: One may modify it
-	 * in the future with vertexMutations To allow vertex mutation without
-	 * removing the vertices.
+	 * injects new vertex from desired input. Note: One may modify it in the
+	 * future with vertexMutations To allow vertex mutation without removing the
+	 * vertices in a previous superstep
 	 * 
 	 * @param file
 	 *            system that is going to be used
@@ -202,55 +238,50 @@ public class DynamicGraphComputation
 	 */
 	public void Inject(FileSystem fs, Path path) throws IOException {
 
-		// Maybe one should use the standard JSONReader.
-		LOG.info("[PROMETHEUS] Creating JSON variables");
+		// Creates JSON variables
 		String line;
 		Text inputLine;
 		JSONArray preProcessedLine;
 
-		LOG.info("[PROMETHEUS] Creating JSON Reader:");
+		// Creates a JSON reader
 		JSONDynamicReader DynamicReader = new JSONDynamicReader();
-		LOG.info("[PROMETHEUS] JSON reader created with success!");
 
-		LOG.info("[PROMETHEUS] Creating Vertex Injection variables");
+		// Creates vertex injection variables
 		LongWritable vertexId;
 		DoubleWritable vertexValue;
 		Iterable<Edge<LongWritable, FloatWritable>> vertexEdges;
 
-		LOG.info("[PROMETHEUS] Creating a Buffered reader");
+		// Creates a buffered reader to read the input file
 		BufferedReader br = new BufferedReader(new InputStreamReader(
 				fs.open(path)));
 		try {
 			line = br.readLine();
 			while (line != null) {
+				// Processes the line information
 				inputLine = new Text(line);
 				preProcessedLine = DynamicReader.preprocessLine(inputLine);
 				vertexId = DynamicReader.getId(preProcessedLine);
 				vertexValue = DynamicReader.getValue(preProcessedLine);
 				vertexEdges = DynamicReader.getEdges(preProcessedLine);
 
-				// Try to use the method that has three parameters.
-				addVertexRequest(vertexId, vertexValue);
-				LOG.info("[PROMETHEUS] Adding vertex [id,value]:" + vertexId
-						+ "," + vertexValue);
+				// Transforms from <iterable>edge to outEdge
+				ArrayListEdges<LongWritable, FloatWritable> outEdges = new ArrayListEdges<LongWritable, FloatWritable>();
+				outEdges.initialize(vertexEdges);
 
-				// Assuming it add edges calls are made after the vertex add
-				// calls
-				for (Edge<LongWritable, FloatWritable> edge : vertexEdges) {
-					addEdgeRequest(vertexId, edge);
-				}
-				LOG.info("[PROMETHEUS] All edges added to vertex" + vertexId);
+				// Requests vertex add
+				addVertexRequest(vertexId, vertexValue, outEdges);
+				LOG.info("Adding vertex: id,value:" + vertexId + ","
+						+ vertexValue);
 
+				// Gets next file line
 				line = br.readLine();
 			}
 		} catch (JSONException e) {
-			LOG.info("[PROMETHEUS] Problem in JSON reader");
+			LOG.info("Problem in JSON reader");
 			e.printStackTrace();
 		} finally {
 			br.close();
 		}
-		// //Do vertex mutations
-		// //Use vertex resolver*/
 	}
 
 	@Override
@@ -260,37 +291,48 @@ public class DynamicGraphComputation
 			try {
 				addVertexRequest(INJECTOR_VERTEX_ID, INJECTOR_VERTEX_VALUE);
 			} catch (IOException e) {
-				LOG.info("[PROMETHEUS] Could not add injector vertex!");
+				LOG.info("Could not create injector vertex!");
 				e.printStackTrace();
 			}
-			LOG.info("[PROMETHEUS] Injector vertex created!");
+			LOG.info("Injector sucessfully created!");
 		}
 	}
 
-	public void InformMasterCompute() {
-		// Tells the Master Compute that the database update is done.
+	/**
+	 * Tells master compute that the vertex data-base is up-to-date
+	 */
+	public void informMasterCompute() {
 		aggregate(INJ_RDY_AGG, new BooleanWritable(true));
 	}
 
 	/**
 	 * Master Compute associated with {@link DynamicGraphComputation}. It is the
-	 * first thing to run in each super step. It has a watcher to see if there
+	 * first thing to run in each super step. It has an observer to see if there
 	 * is any modification in input
 	 */
 
 	public static class InjectorMasterCompute extends DefaultMasterCompute {
 
+		/**
+		 * Insert the paths to be watched here. One can easily modify the
+		 * Aggregator to use an array of paths.
+		 */
 		private String inputPath = "/user/hduser/dynamic/GoogleJSON.txt";
 
+		/**
+		 * Used by the master compute to avoid accessing the file system while
+		 * the workers are still processing a previous mutation
+		 */
 		BooleanWritable isRdyForMutations;
 
 		/** Class logger */
 		private final Logger LOG = Logger
 				.getLogger(InjectorMasterCompute.class);
 
-		FileWatcher fileWatcher;
-
-		// private final long SLEEPSECONDS = 1;
+		/**
+		 * Object that will watch the given paths.
+		 */
+		FileObserver FileObserver;
 
 		@Override
 		public void initialize() throws InstantiationException,
@@ -306,92 +348,80 @@ public class DynamicGraphComputation
 			// set Aggregators initial values
 			setAggregatedValue(PATH_AGG, new Text(inputPath));
 			setAggregatedValue(FS_AGG, new BooleanWritable(false));
-			setAggregatedValue(INJ_RDY_AGG, new BooleanWritable(true)); // is
-																		// ready
-																		// for
-																		// new
-																		// mutations.
+			setAggregatedValue(INJ_RDY_AGG, new BooleanWritable(true));
 
 			// Start the File Watcher
-			fileWatcher = new FileWatcher(inputPath);
-			LOG.info("[PROMETHEUS] Master Compute Initialized.");
+			FileObserver = new FileObserver(inputPath);
+			LOG.info("Dynamic Master Compute successfully initialized.");
 		}
 
 		@Override
 		public void compute() {
-			LOG.info("[PROMETHEUS] MasterCompute Compute() method:");
-			LOG.info("[PROMETHEUS] Superstep number: " + getSuperstep());
 
 			isRdyForMutations = (BooleanWritable) getAggregatedValue(INJ_RDY_AGG);
 
 			if (true == isRdyForMutations.get()) {
-				LOG.info("[PROMETHEUS] The structure is ready for mutations in superstep: "
+				LOG.info("The structure is ready for mutations in superstep: "
 						+ getSuperstep());
-				LOG.info("[PROMETHEUS] Checking if the file was modified");
+				LOG.info("Checking if the file was modified");
 
-				// fileWatcher.checkFileModification();
-				setAggregatedValue(FS_AGG, new BooleanWritable(true)); // Just
-																		// testing
+				// Uncomment the line below in order to enable dynamic input
+				// analysis
+				// FileObserver.checkFileModification();
 
-				// try {
-				// LOG.info("[PROMETHEUS] Going to sleep for " +
-				// TimeUnit.SECONDS.toMillis(SLEEPSECONDS));
-				// Thread.sleep(TimeUnit.SECONDS.toMillis(SLEEPSECONDS));
-				// //Holds
-				// each superstep for SLEEPSECONDS
-				// } catch (InterruptedException e) {
-				// e.printStackTrace();
-				// }
+				// This next line is just for debugging the application. It will
+				// indicate a file modification in every check.
+				setAggregatedValue(FS_AGG, new BooleanWritable(true));
 
-				// If there was a modification, alert injector.
-				if (fileWatcher.getFileModifed() == true) {
-					LOG.info("[PROMETHEUS] The fileWatcher indicates that the file was modified.");
+				// If there was a modification, inform injector.
+				if (FileObserver.getFileModifed() == true) {
+					// Change this to create a get routine from file observer
+					// This will ignore non-modified files in a multiple
+					// file input
+					LOG.info("Modification in file:" + inputPath);
 					setAggregatedValue(FS_AGG, new BooleanWritable(true));
 				}
 			}
 		}
 
 		/**
-		 * Watches the HDFS for any modification in the input files
-		 * 
-		 * @author hduser
+		 * Observes the file system for any modification in the input files
 		 * 
 		 */
-		public static class FileWatcher {
+		public static class FileObserver {
+
+			/**
+			 * Keeps track of the last modification time of the file.
+			 */
 			private long modificationTime;
 
 			/**
-			 * The path that is going to be analysed in every Superstep. One may
-			 * modify it later to change it during the computation Or add more
-			 * than one Path (since multiple paths are already possible in
-			 * Giraph)
+			 * Path to the observed file. May be modified to become an array an
+			 * support more than one file.
 			 */
 			private Path PATH;
 
 			/**
-			 * This flag will become true if the file was modified.
+			 * This flag. True if the file was modified.
 			 */
 			private boolean fileModified = false;
 
 			/** Class logger */
-			private final Logger LOG = Logger.getLogger(FileWatcher.class);
+			private final Logger LOG = Logger.getLogger(FileObserver.class);
 
 			/**
-			 * The configuration file that will be used for HDFS
+			 * Configuration file for the file system
 			 */
 			Configuration config = new Configuration();
 
-			/**
-			 * Used in order to access the HDFS
-			 */
 			private FileSystem fs;
 
 			/**
-			 * Is the file status of the target file. The TimeStamp is in it.
+			 * File status of the target file. The time stamp is in it.
 			 */
 			FileStatus fileStatus;
 
-			FileWatcher(String inputPath) {
+			FileObserver(String inputPath) {
 				PATH = new Path(inputPath);
 
 				// Initialises the file system
@@ -409,34 +439,30 @@ public class DynamicGraphComputation
 				}
 
 				modificationTime = fileStatus.getModificationTime();
-				LOG.info("[PROMETHEUS] The modification time (UTC) is: "
+				LOG.info("Original modification time (UTC) is: "
 						+ modificationTime);
 				this.fileModified = false;
 			}
 
 			/**
-			 * Check if the watched file was modified in the beginning of every
+			 * Check if the observed file was modified in the beginning of every
 			 * super step
 			 */
 			public void checkFileModification() {
-
 				// Check if one has to update the file status every single time.
 				try {
 					fileStatus = fs.getFileStatus(PATH);
 				} catch (IOException e) {
-					LOG.info("[PROMETHEUS ERROR] Error getting File status.");
+					LOG.info("Error getting File status.");
+					e.getStackTrace();
 				}
 
 				long modtime = fileStatus.getModificationTime();
 				if (modtime != modificationTime) {
 					fileModified = true;
 					this.modificationTime = modtime;
-					LOG.info("[PROMETHEUS] The file was modified during the superstep!");
-					LOG.info("[PROMETHEUS] The new modification time is: "
-							+ this.modificationTime);
 				} else {
 					fileModified = false;
-					LOG.info("[PROMETHEUS] The file was NOT modified in the current superstep.");
 				}
 			}
 
@@ -446,6 +472,10 @@ public class DynamicGraphComputation
 		}
 	}
 
+	/**
+	 * This is just a modification of the JSON Reader class available in the
+	 * Giraph original classes.
+	 */
 	public static class JSONDynamicReader {
 
 		public JSONDynamicReader() {

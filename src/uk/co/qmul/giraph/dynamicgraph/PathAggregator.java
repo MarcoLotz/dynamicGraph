@@ -17,6 +17,7 @@
  */
 
 package uk.co.qmul.giraph.dynamicgraph;
+
 import org.apache.giraph.aggregators.BasicAggregator;
 import org.apache.hadoop.io.Text;
 

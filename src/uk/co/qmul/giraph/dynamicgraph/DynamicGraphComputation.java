@@ -49,18 +49,16 @@ import java.util.List;
 import com.google.common.collect.Lists;
 
 /**
- * Demonstrates the Pregel concepts applied to Dynamic Graphs. It uses a File
- * Observer to warn a special vertex when and what to inject into the
- * application
+ * Demonstrates a basic structure in order to allow Pregel to make computations
+ * over Dynamic Graphs.
  * 
  * @author Marco Aurelio Lotz
  */
 
-@Algorithm(name = "Dynamic Graph Computation", description = "Computes dynamic graphs")
+@Algorithm(name = "Dynamic Graph Computation", description = "Makes computation on dynamic graphs")
 public class DynamicGraphComputation
 		extends
 		BasicComputation<LongWritable, DoubleWritable, FloatWritable, DoubleWritable> {
-
 	/**
 	 * Path Aggregator name. This Aggregator is used to communicate the
 	 * injection Path from the Master to the Injector vertex.
@@ -79,13 +77,12 @@ public class DynamicGraphComputation
 	 * vertice database inside the workers is up-to-date. Blocks new data base
 	 * update request from the master.
 	 */
-
 	private static String INJ_RDY_AGG = "InjectionReadyAgg";
 
 	/**
 	 * Maximum number of Supersteps to be computed before halting.
 	 */
-	public final int MAX_SUPERSTEPS = 7;
+	public final int MAX_SUPERSTEPS = 6;
 
 	/**
 	 * Used by the injector vertex in order to wait a complete superstep before
@@ -110,22 +107,6 @@ public class DynamicGraphComputation
 	 */
 	BooleanWritable fsModificationStatus = new BooleanWritable();
 
-	/**
-	 * Send messages to all adjacent vertices. The content of the messages is
-	 * not important, since just the event of receiving a message removes the
-	 * vertex from the inactive status. This should be modified for other types
-	 * of computations
-	 * 
-	 * @param current
-	 *            vertex.
-	 */
-	public void BFSMessages(
-			Vertex<LongWritable, DoubleWritable, FloatWritable> vertex) {
-		for (Edge<LongWritable, FloatWritable> edge : vertex.getEdges()) {
-			sendMessage(edge.getTargetVertexId(), new DoubleWritable(1d));
-		}
-	}
-
 	@Override
 	public void compute(
 			Vertex<LongWritable, DoubleWritable, FloatWritable> vertex,
@@ -134,26 +115,23 @@ public class DynamicGraphComputation
 
 			// Checks if Master indicated a modification in the FileSystem
 			fsModificationStatus = (BooleanWritable) getAggregatedValue(FS_AGG);
-
+			
 			// Injector vertex routine
 			if (vertex.getId() == INJECTOR_VERTEX_ID) {
+				// Injector launches the monitor
 				InjectorMonitor();
 			}
+			
 			// All other vertex computation are here.
 			else {
 				// Removes all nodes if there was a FS modification
 				if ((vertex.getId() != INJECTOR_VERTEX_ID)
 						&& (fsModificationStatus.get())) {
 					LOG.info("Vertex :" + vertex.getId().get()
-							+ " being removed in superstep: " + getSuperstep());
+							+ " being removed in superstep " + getSuperstep());
 					removeVertexRequest(vertex.getId());
 				} else {
-					// Insert standard computation code here.
-					// It is important the a vertex that requested to be removed
-					// do not receive any message.
-					BFSMessages(vertex);
-
-					// The injector vertex should never halt.
+					// Vertices do standard computation here
 					vertex.voteToHalt();
 				}
 			}
@@ -163,30 +141,21 @@ public class DynamicGraphComputation
 		}
 	}
 
-	/**
-	 * Injector vertex checks for a modification in the file system.
-	 */
 	public void InjectorMonitor() {
 		// Checks for file system update
 		if (true == fsModificationStatus.get()) {
-			LOG.info("Master indicated modification in input files.");
-			LOG.info("Modification superstep: " + getSuperstep());
+			LOG.info("Superstep: "
+					+ getSuperstep()
+					+ " - The master has communicated a modification in the file system");
 
-			// Only Injects a superstep after the modification, the first call
-			// is
-			// when the vertices will be getting removed.
-			// One can also do this by using the getNumberVertex and wait until
-			// it is only the injector or do in the same removal superstep by
-			// using the VertexResolver
+			// Only Injects in the second call of this method.
+			// In the first call the other vertices will be being removed
+			// One can also use the number of vertices to trigger this event.
 			if (true == WaitedRemoval) {
 				try {
-					updateVertexDataBase();
-
-					// Informs master that the update is finished
-					informMasterCompute();
+					UpdateFileSystem();
 				} catch (IOException e) {
-					LOG.info("Problem updating vertex data base.");
-					e.getStackTrace();
+					LOG.info("Problem Updating vertex database.");
 				}
 				WaitedRemoval = false;
 			} else {
@@ -201,34 +170,35 @@ public class DynamicGraphComputation
 	 * 
 	 * @throws IOException
 	 */
-	public void updateVertexDataBase() throws IOException {
+	public void UpdateFileSystem() throws IOException {
 		FileSystem fs;
 		Configuration config = new Configuration();
 		FileStatus fileStatus;
 
-		// Gets the File System path to the modified file
+		// Gets the HDFS paths
 		Text inputString = getAggregatedValue(PATH_AGG);
 		Path inputPath = new Path(inputString.toString());
-
+		
 		LOG.info("Injector: the path is" + inputPath.getParent()
 				+ inputPath.getName());
-
+		
 		fs = FileSystem.get(config);
 
 		LOG.info("Checking file in File System");
 		fileStatus = fs.getFileStatus(inputPath);
+		
 		if (null != fileStatus) {
 			// Do the injection.
 			Inject(fs, inputPath);
 		} else {
 			LOG.info("Problem looking for the file in HDFS");
 		}
+		
+		InformMasterCompute();
 	}
 
 	/**
-	 * injects new vertex from desired input. Note: One may modify it in the
-	 * future with vertexMutations To allow vertex mutation without removing the
-	 * vertices in a previous superstep
+	 * injects new vertex from desired input. 
 	 * 
 	 * @param file
 	 *            system that is going to be used
@@ -238,15 +208,13 @@ public class DynamicGraphComputation
 	 */
 	public void Inject(FileSystem fs, Path path) throws IOException {
 
-		// Creates JSON variables
+		// Create JSON variables
 		String line;
 		Text inputLine;
 		JSONArray preProcessedLine;
-
-		// Creates a JSON reader
 		JSONDynamicReader DynamicReader = new JSONDynamicReader();
 
-		// Creates vertex injection variables
+		// Create injection variables
 		LongWritable vertexId;
 		DoubleWritable vertexValue;
 		Iterable<Edge<LongWritable, FloatWritable>> vertexEdges;
@@ -264,16 +232,18 @@ public class DynamicGraphComputation
 				vertexValue = DynamicReader.getValue(preProcessedLine);
 				vertexEdges = DynamicReader.getEdges(preProcessedLine);
 
-				// Transforms from <iterable>edge to outEdge
 				ArrayListEdges<LongWritable, FloatWritable> outEdges = new ArrayListEdges<LongWritable, FloatWritable>();
 				outEdges.initialize(vertexEdges);
 
 				// Requests vertex add
-				addVertexRequest(vertexId, vertexValue, outEdges);
-				LOG.info("Adding vertex: id,value:" + vertexId + ","
+				addVertexRequest(vertexId, vertexValue);
+				LOG.info("Adding vertex [id,value]:" + vertexId + ","
 						+ vertexValue);
 
-				// Gets next file line
+				// Add edges to that vertex
+				for (Edge<LongWritable, FloatWritable> edge : vertexEdges) {
+					addEdgeRequest(vertexId, edge);
+				}
 				line = br.readLine();
 			}
 		} catch (JSONException e) {
@@ -291,24 +261,24 @@ public class DynamicGraphComputation
 			try {
 				addVertexRequest(INJECTOR_VERTEX_ID, INJECTOR_VERTEX_VALUE);
 			} catch (IOException e) {
-				LOG.info("Could not create injector vertex!");
+				LOG.info("Could not create injector vertex.");
 				e.printStackTrace();
 			}
-			LOG.info("Injector sucessfully created!");
+			LOG.info("Injector sucessfully created.");
 		}
 	}
 
 	/**
 	 * Tells master compute that the vertex data-base is up-to-date
 	 */
-	public void informMasterCompute() {
+	public void InformMasterCompute() {
 		aggregate(INJ_RDY_AGG, new BooleanWritable(true));
 	}
 
 	/**
 	 * Master Compute associated with {@link DynamicGraphComputation}. It is the
-	 * first thing to run in each super step. It has an observer to see if there
-	 * is any modification in input
+	 * first thing to run in each super step. It has an observer to track if
+	 * there is any modification in input
 	 */
 
 	public static class InjectorMasterCompute extends DefaultMasterCompute {
@@ -330,9 +300,9 @@ public class DynamicGraphComputation
 				.getLogger(InjectorMasterCompute.class);
 
 		/**
-		 * Object that will watch the given paths.
+		 * Object that will track the given paths.
 		 */
-		FileObserver FileObserver;
+		FileObserver fileObserver;
 
 		@Override
 		public void initialize() throws InstantiationException,
@@ -350,34 +320,32 @@ public class DynamicGraphComputation
 			setAggregatedValue(FS_AGG, new BooleanWritable(false));
 			setAggregatedValue(INJ_RDY_AGG, new BooleanWritable(true));
 
-			// Start the File Watcher
-			FileObserver = new FileObserver(inputPath);
+			// Start the File Observer
+			fileObserver = new FileObserver(inputPath);
 			LOG.info("Dynamic Master Compute successfully initialized.");
 		}
 
 		@Override
 		public void compute() {
+			LOG.info("MasterCompute - Superstep number: " + getSuperstep());
 
 			isRdyForMutations = (BooleanWritable) getAggregatedValue(INJ_RDY_AGG);
 
+			// If the framework already finished processing previous mutations
 			if (true == isRdyForMutations.get()) {
-				LOG.info("The structure is ready for mutations in superstep: "
-						+ getSuperstep());
-				LOG.info("Checking if the file was modified");
+				LOG.info("The framework is ready for mutations");
 
 				// Uncomment the line below in order to enable dynamic input
 				// analysis
 				// FileObserver.checkFileModification();
-
+				
+				
 				// This next line is just for debugging the application. It will
 				// indicate a file modification in every check.
 				setAggregatedValue(FS_AGG, new BooleanWritable(true));
 
-				// If there was a modification, inform injector.
-				if (FileObserver.getFileModifed() == true) {
-					// Change this to create a get routine from file observer
-					// This will ignore non-modified files in a multiple
-					// file input
+				// Inform inject if modification in FS
+				if (true == fileObserver.getFileModifed()) {
 					LOG.info("Modification in file:" + inputPath);
 					setAggregatedValue(FS_AGG, new BooleanWritable(true));
 				}
@@ -385,24 +353,19 @@ public class DynamicGraphComputation
 		}
 
 		/**
-		 * Observes the file system for any modification in the input files
+		 * Observes the HDFS for any modification in the input files
 		 * 
 		 */
 		public static class FileObserver {
+			private long modificationTime;
 
 			/**
 			 * Keeps track of the last modification time of the file.
 			 */
-			private long modificationTime;
-
-			/**
-			 * Path to the observed file. May be modified to become an array an
-			 * support more than one file.
-			 */
 			private Path PATH;
 
 			/**
-			 * This flag. True if the file was modified.
+			 * True if the file was modified.
 			 */
 			private boolean fileModified = false;
 
@@ -417,7 +380,7 @@ public class DynamicGraphComputation
 			private FileSystem fs;
 
 			/**
-			 * File status of the target file. The time stamp is in it.
+			 * Used to get the timestamp
 			 */
 			FileStatus fileStatus;
 
@@ -439,22 +402,21 @@ public class DynamicGraphComputation
 				}
 
 				modificationTime = fileStatus.getModificationTime();
-				LOG.info("Original modification time (UTC) is: "
-						+ modificationTime);
+				LOG.info("Original modification time (UTC) is: " + modificationTime);
 				this.fileModified = false;
 			}
 
 			/**
-			 * Check if the observed file was modified in the beginning of every
+			 * Check if the tracked file was modified in the beginning of every
 			 * super step
 			 */
 			public void checkFileModification() {
+
 				// Check if one has to update the file status every single time.
 				try {
 					fileStatus = fs.getFileStatus(PATH);
 				} catch (IOException e) {
 					LOG.info("Error getting File status.");
-					e.getStackTrace();
 				}
 
 				long modtime = fileStatus.getModificationTime();

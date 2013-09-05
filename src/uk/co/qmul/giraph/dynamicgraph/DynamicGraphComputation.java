@@ -20,7 +20,6 @@ package uk.co.qmul.giraph.dynamicgraph;
 
 import org.apache.giraph.Algorithm;
 import org.apache.giraph.graph.BasicComputation;
-import org.apache.giraph.edge.ArrayListEdges;
 import org.apache.giraph.edge.Edge;
 import org.apache.giraph.edge.EdgeFactory;
 import org.apache.giraph.graph.Vertex;
@@ -45,7 +44,6 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.List;
-
 import com.google.common.collect.Lists;
 
 /**
@@ -66,84 +64,50 @@ public class DynamicGraphComputation
 	private static String PATH_AGG = "PathAgg";
 
 	/**
-	 * File System update aggregator. This aggregator is used in order to
-	 * communicate the injector that a modification in the observed file has
-	 * happened.
+	 * Used to indicate the master that the update is finished
 	 */
-	private static String FS_AGG = "FileSystemAgg";
+	private static final BooleanWritable UpdateFinish = new BooleanWritable(false);
 
 	/**
-	 * Injection Complete Status Aggregator. Used to tell the Master that the
-	 * vertice database inside the workers is up-to-date. Blocks new data base
-	 * update request from the master.
+	 * Serves as a flag of communication between vertices and the master.
+	 * Its value controls the update behaviour.
 	 */
-	private static String INJ_RDY_AGG = "InjectionReadyAgg";
+	private static String U_UP_AGG = "UnderUpgradeAgg";
 
 	/**
 	 * Maximum number of Supersteps to be computed before halting.
 	 */
-	public final int MAX_SUPERSTEPS = 6;
+	public final int MAX_SUPERSTEPS = 33;
 
 	/**
-	 * Used by the injector vertex in order to wait a complete superstep before
-	 * starting injection. In the superstep that the injector is waiting, nodes
-	 * that are not the injector request removal.
+	 * Flag used by the injector to wait a superstep after removal only Before
+	 * starting the injection
 	 */
 	public static boolean WaitedRemoval = false;
-
-	/**
-	 * Injector vertex information
-	 */
-	public static final LongWritable INJECTOR_VERTEX_ID = new LongWritable(-1);
-	public static final DoubleWritable INJECTOR_VERTEX_VALUE = new DoubleWritable(
-			-100);
 
 	/** Class logger */
 	private static final Logger LOG = Logger
 			.getLogger(DynamicGraphComputation.class);
-
-	/**
-	 * Checks if the FS suffered a modification
-	 */
-	BooleanWritable fsModificationStatus = new BooleanWritable();
 
 	@Override
 	public void compute(
 			Vertex<LongWritable, DoubleWritable, FloatWritable> vertex,
 			Iterable<DoubleWritable> messages) throws IOException {
 		if (getSuperstep() < MAX_SUPERSTEPS) {
-
-			// Checks if Master indicated a modification in the FileSystem
-			fsModificationStatus = (BooleanWritable) getAggregatedValue(FS_AGG);
-			
-			// Injector vertex routine
-			if (vertex.getId() == INJECTOR_VERTEX_ID) {
-				// Injector launches the monitor
-				InjectorMonitor();
-			}
-			
-			// All other vertex computation are here.
-			else {
-				// Removes all nodes if there was a FS modification
-				if ((vertex.getId() != INJECTOR_VERTEX_ID)
-						&& (fsModificationStatus.get())) {
-					LOG.info("Vertex :" + vertex.getId().get()
-							+ " being removed in superstep " + getSuperstep());
-					removeVertexRequest(vertex.getId());
-				} else {
-					// Vertices do standard computation here
-					vertex.voteToHalt();
-				}
-			}
+			// ------------------------------------------------
+			// Remove code and insert any computation code here
+			sendMessage(vertex.getId(), new DoubleWritable(1d));
+			vertex.voteToHalt();
+			// ------------------------------------------------
 		} else {
-			// Always converge if Maximum Superstep, even the Injector
 			vertex.voteToHalt();
 		}
 	}
 
-	public void InjectorMonitor() {
-		// Checks for file system update
-		if (true == fsModificationStatus.get()) {
+	@Override
+	public void Inject() {
+		// checks for updateFlag, that is changed in the presuperstep
+		if (true == isUnderUpdate()) {
 			LOG.info("Superstep: "
 					+ getSuperstep()
 					+ " - The master has communicated a modification in the file system");
@@ -152,8 +116,12 @@ public class DynamicGraphComputation
 			// In the first call the other vertices will be being removed
 			// One can also use the number of vertices to trigger this event.
 			if (true == WaitedRemoval) {
+				LOG.info("Injector updateFile System on superstep: "
+						+ getSuperstep());
 				try {
 					UpdateFileSystem();
+					// Tell the file system that the update is over.
+					InformMasterCompute();
 				} catch (IOException e) {
 					LOG.info("Problem Updating vertex database.");
 				}
@@ -178,27 +146,25 @@ public class DynamicGraphComputation
 		// Gets the HDFS paths
 		Text inputString = getAggregatedValue(PATH_AGG);
 		Path inputPath = new Path(inputString.toString());
-		
+
 		LOG.info("Injector: the path is" + inputPath.getParent()
 				+ inputPath.getName());
-		
+
 		fs = FileSystem.get(config);
 
 		LOG.info("Checking file in File System");
 		fileStatus = fs.getFileStatus(inputPath);
-		
+
 		if (null != fileStatus) {
 			// Do the injection.
-			Inject(fs, inputPath);
+			BeginInjection(fs, inputPath);
 		} else {
-			LOG.info("Problem looking for the file in HDFS");
+			LOG.info("Problem looking for the file in File System");
 		}
-		
-		InformMasterCompute();
 	}
 
 	/**
-	 * injects new vertex from desired input. 
+	 * injects new vertex from desired input.
 	 * 
 	 * @param file
 	 *            system that is going to be used
@@ -206,7 +172,7 @@ public class DynamicGraphComputation
 	 *            that is going to be read
 	 * @throws IOException
 	 */
-	public void Inject(FileSystem fs, Path path) throws IOException {
+	public void BeginInjection(FileSystem fs, Path path) throws IOException {
 
 		// Create JSON variables
 		String line;
@@ -232,12 +198,10 @@ public class DynamicGraphComputation
 				vertexValue = DynamicReader.getValue(preProcessedLine);
 				vertexEdges = DynamicReader.getEdges(preProcessedLine);
 
-				ArrayListEdges<LongWritable, FloatWritable> outEdges = new ArrayListEdges<LongWritable, FloatWritable>();
-				outEdges.initialize(vertexEdges);
-
 				// Requests vertex add
 				addVertexRequest(vertexId, vertexValue);
-				LOG.info("Adding vertex [id,value]:" + vertexId + ","
+				LOG.info("Superstep: " + getSuperstep()
+						+ " Adding vertex [id,value]:" + vertexId + ","
 						+ vertexValue);
 
 				// Add edges to that vertex
@@ -256,23 +220,31 @@ public class DynamicGraphComputation
 
 	@Override
 	public void preSuperstep() {
-		super.preSuperstep();
-		if (getSuperstep() == 0) {
+		// Only creates the injector in the first superstep
+		if (0 == getSuperstep()) {
+			// One should make sure that only one injector is created
+			// Or solve it through the vertex resolver.
+			// This may cause race conditions in the execution of this code.
 			try {
 				addVertexRequest(INJECTOR_VERTEX_ID, INJECTOR_VERTEX_VALUE);
+				LOG.info("Injector vertex created with success in superstep:"
+						+ getSuperstep());
 			} catch (IOException e) {
-				LOG.info("Could not create injector vertex.");
+				LOG.info("Problem creating the injector vertex.");
 				e.printStackTrace();
 			}
-			LOG.info("Injector sucessfully created.");
 		}
+		// Checks if Master indicated a modification in the FileSystem
+		LOG.info("[PROMETHEUS] Checking update status" + getSuperstep());
+		setUnderUpdate(((BooleanWritable) getAggregatedValue(U_UP_AGG)));
 	}
 
 	/**
 	 * Tells master compute that the vertex data-base is up-to-date
 	 */
 	public void InformMasterCompute() {
-		aggregate(INJ_RDY_AGG, new BooleanWritable(true));
+		LOG.info("Setting Under Update status to false");
+		aggregate(U_UP_AGG, UpdateFinish);
 	}
 
 	/**
@@ -287,13 +259,19 @@ public class DynamicGraphComputation
 		 * Insert the paths to be watched here. One can easily modify the
 		 * Aggregator to use an array of paths.
 		 */
-		private String inputPath = "/user/hduser/dynamic/GoogleJSON.txt";
+		private String inputPath = "/user/hduser/dynamic/ReducedJournal.txt";
 
 		/**
 		 * Used by the master compute to avoid accessing the file system while
 		 * the workers are still processing a previous mutation
 		 */
-		BooleanWritable isRdyForMutations;
+		boolean isUnderUpdate = false;
+
+		/**
+		 * Number of supersteps that it waited before
+		 * Before looking for another update.
+		 */
+		private int numberOfWaitedSupersteps = 0;
 
 		/** Class logger */
 		private final Logger LOG = Logger
@@ -310,44 +288,59 @@ public class DynamicGraphComputation
 
 			// Register Aggregators
 			registerPersistentAggregator(PATH_AGG, PathAggregator.class);
-			registerPersistentAggregator(FS_AGG,
-					BooleanOverwriteAggregator.class);
-			registerPersistentAggregator(INJ_RDY_AGG,
+			registerPersistentAggregator(U_UP_AGG,
 					BooleanOverwriteAggregator.class);
 
 			// set Aggregators initial values
 			setAggregatedValue(PATH_AGG, new Text(inputPath));
-			setAggregatedValue(FS_AGG, new BooleanWritable(false));
-			setAggregatedValue(INJ_RDY_AGG, new BooleanWritable(true));
+			setAggregatedValue(U_UP_AGG, new BooleanWritable(false));
 
 			// Start the File Observer
 			fileObserver = new FileObserver(inputPath);
+
 			LOG.info("Dynamic Master Compute successfully initialized.");
 		}
 
 		@Override
 		public void compute() {
 			LOG.info("MasterCompute - Superstep number: " + getSuperstep());
+			isUnderUpdate = ((BooleanWritable) getAggregatedValue(U_UP_AGG))
+					.get();
 
-			isRdyForMutations = (BooleanWritable) getAggregatedValue(INJ_RDY_AGG);
-
+			// Waits two supersteps after an update in the files system
+			// Then it assumes that the file system is up to date.
+			// One can solve this by using aggregator.
+			if (isUnderUpdate) {
+				if (1 == numberOfWaitedSupersteps) {
+					LOG.info("Changing is under update to FALSE");
+					setAggregatedValue(U_UP_AGG, new BooleanWritable(false));
+					numberOfWaitedSupersteps = 0;
+				} else {
+					numberOfWaitedSupersteps++;
+				}
+			}
 			// If the framework already finished processing previous mutations
-			if (true == isRdyForMutations.get()) {
+			if (!isUnderUpdate) {
 				LOG.info("The framework is ready for mutations");
+				// Reset aggregator value.
+				setAggregatedValue(U_UP_AGG, new BooleanWritable(false));
 
 				// Uncomment the line below in order to enable dynamic input
 				// analysis
 				// FileObserver.checkFileModification();
-				
-				
-				// This next line is just for debugging the application. It will
-				// indicate a file modification in every check.
-				setAggregatedValue(FS_AGG, new BooleanWritable(true));
 
-				// Inform inject if modification in FS
+				// This next line is just for debugging the application. It will
+				// indicate a file modification in determined supersteps.
+
+				if (getSuperstep() % 10 == 9) {
+					LOG.info("Creating framework update notification");
+					setAggregatedValue(U_UP_AGG, new BooleanWritable(true));
+				}
+
+				// Inform injector if modification in FS
 				if (true == fileObserver.getFileModifed()) {
 					LOG.info("Modification in file:" + inputPath);
-					setAggregatedValue(FS_AGG, new BooleanWritable(true));
+					setAggregatedValue(U_UP_AGG, new BooleanWritable(true));
 				}
 			}
 		}
@@ -402,7 +395,8 @@ public class DynamicGraphComputation
 				}
 
 				modificationTime = fileStatus.getModificationTime();
-				LOG.info("Original modification time (UTC) is: " + modificationTime);
+				LOG.info("Original modification time (UTC) is: "
+						+ modificationTime);
 				this.fileModified = false;
 			}
 
